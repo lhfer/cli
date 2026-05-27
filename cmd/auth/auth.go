@@ -17,6 +17,7 @@ import (
 	larkauth "github.com/larksuite/cli/internal/auth"
 	"github.com/larksuite/cli/internal/cmdutil"
 	"github.com/larksuite/cli/internal/core"
+	"github.com/larksuite/cli/internal/errclass"
 )
 
 // NewCmdAuth creates the auth command with subcommands.
@@ -110,6 +111,11 @@ type appInfoResponse struct {
 	} `json:"data"`
 }
 
+// getAppInfoFn is the package-level seam used by callers (scopes.go) so tests
+// can substitute a fake without standing up a full SDK + httpmock pipeline.
+// Mirrors the pollDeviceToken pattern in login.go.
+var getAppInfoFn = getAppInfo
+
 // getAppInfo queries app info from the Lark API.
 func getAppInfo(ctx context.Context, f *cmdutil.Factory, appId string) (*appInfo, error) {
 	ac, err := f.NewAPIClient()
@@ -134,7 +140,7 @@ func getAppInfo(ctx context.Context, f *cmdutil.Factory, appId string) (*appInfo
 		return nil, fmt.Errorf("failed to parse response: %v", err)
 	}
 	if resp.Code != 0 {
-		return nil, fmt.Errorf("API error [%d]: %s", resp.Code, resp.Msg)
+		return nil, classifyAppInfoErr(apiResp.RawBody, resp.Code, resp.Msg, f, appId)
 	}
 
 	app := resp.Data.App
@@ -152,4 +158,22 @@ func getAppInfo(ctx context.Context, f *cmdutil.Factory, appId string) (*appInfo
 	}
 
 	return &appInfo{OwnerOpenId: ownerOpenId, UserScopes: userScopes}, nil
+}
+
+// classifyAppInfoErr re-decodes the raw body so BuildAPIError sees the
+// upstream `error` block — the typed appInfoResponse shape drops it.
+func classifyAppInfoErr(rawBody []byte, code int, msg string, f *cmdutil.Factory, appId string) error {
+	var raw map[string]any
+	_ = json.Unmarshal(rawBody, &raw)
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	raw["code"] = code
+	raw["msg"] = msg
+	cc := errclass.ClassifyContext{Identity: string(core.AsBot)}
+	if cfg, _ := f.Config(); cfg != nil {
+		cc.Brand = string(cfg.Brand)
+		cc.AppID = appId
+	}
+	return errclass.BuildAPIError(raw, cc)
 }
